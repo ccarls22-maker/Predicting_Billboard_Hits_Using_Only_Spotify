@@ -1,0 +1,1417 @@
+---
+title: "GXBoost ML Project"
+format: gfm
+---
+
+```{python}
+import pandas as pd 
+import numpy as np  
+from plotnine import *  
+import xgboost as xgb 
+from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (
+    accuracy_score, log_loss, roc_auc_score, confusion_matrix, classification_report, ConfusionMatrixDisplay, f1_score
+)
+from sklearn.model_selection import ParameterGrid
+from tqdm import tqdm 
+import matplotlib.pyplot as plt
+import shap
+from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+```
+
+```{python}
+from xgboost import XGBClassifier
+```
+
+# Previously ran a fuzzy Match to combine data sets. 
+# Billboard Data was scrpaed from the Billboard Website, spotify dataset was found on Kaggle
+
+```{python}
+import pandas as pd
+
+df = pd.read_csv(r"C:\Users\court\Downloads\Turn_in_Models\spotify_billboard_fuzzy95.csv")
+
+```
+
+```{python}
+df["song_flag"] = df["combo"].notna().astype(int)
+```
+
+```{python}
+
+df["year"] = df["year"].astype('category')
+
+```
+
+```{python}
+df = df.drop(columns = ["combo","min_rank","artist","song","track_id","track_name"])
+```
+
+# Create a test and train split *Note data is highly imbalanced
+
+```{python}
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+X = df.drop(columns=["song_flag"])
+y = df["song_flag"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.20,
+    stratify=y,        
+    random_state=13
+)
+
+
+```
+
+
+```{python}
+freq = X_train['artist_name'].value_counts()
+X_train['artist_name_freq'] = X_train['artist_name'].map(freq)
+X_test['artist_name_freq']  = X_test['artist_name'].map(freq).fillna(0)
+
+
+```
+
+# Check Data Types
+
+```{python}
+obj_cols = X.select_dtypes(include="object").columns
+print("Object columns before:", obj_cols.tolist())
+
+for col in obj_cols:
+    X[col] = X[col].astype("category")
+
+
+print(X.dtypes)  
+```
+
+# Handle data imablance and run XGBoost
+
+```{python}
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2, 
+    stratify=y,
+    random_state=13
+)
+
+
+scale_pos_weight = (len(y_train) - y_train.sum()) / y_train.sum()
+
+model = XGBClassifier(
+    n_estimators=500,
+    learning_rate=0.05,
+    max_depth=6,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    objective="binary:logistic",
+    eval_metric="aucpr",
+    scale_pos_weight=scale_pos_weight,
+    enable_categorical=True,
+    random_state=13,
+    n_jobs=-1
+)
+model.fit(X_train, y_train)
+
+preds = model.predict(X_test)
+probs = model.predict_proba(X_test)[:, 1]
+
+print(classification_report(y_test, preds, digits=3))
+
+```
+
+# Complete XGBoost Analysis with Hyperparameter Tuning using a Smaller Sample
+
+```{python}
+import pandas as pd
+import numpy as np
+from plotnine import *
+import xgboost as xgb
+from xgboost import XGBClassifier  
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
+from sklearn.metrics import (
+    classification_report, average_precision_score, make_scorer
+)
+import time
+import matplotlib.pyplot as plt
+
+X_sample, _, y_sample, _ = train_test_split(
+    X, y, 
+    test_size=0.90,  # Keep only 10% of data
+    stratify=y, 
+    random_state=13
+)
+
+
+obj_cols = X_sample.select_dtypes(include="object").columns
+for col in obj_cols:
+    X_sample[col] = X_sample[col].astype("category")
+
+print(f"Features: {X_sample.shape[1]}, Samples: {X_sample.shape[0]}")
+print(f"Target distribution: {y_sample.value_counts(normalize=True)}")
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X_sample, y_sample, test_size=0.2, stratify=y_sample, random_state=13
+)
+
+scale_pos_weight = (len(y_train) - y_train.sum()) / y_train.sum()
+print(f"Scale pos weight: {scale_pos_weight:.2f}")
+
+```
+
+# Baseline XGBoost model with tuned features, tuned with speed in mind
+
+```{python}
+baseline_model = XGBClassifier(
+    n_estimators=100,         # Reduced from 500 to 100
+    learning_rate=0.1,        # Increased from 0.05 to 0.1 for faster results
+    max_depth=6,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=scale_pos_weight,
+    enable_categorical=True,
+    random_state=13,
+    n_jobs=-1
+)
+baseline_model.fit(X_train, y_train)
+
+baseline_preds = baseline_model.predict(X_test)
+baseline_probs = baseline_model.predict_proba(X_test)[:, 1]
+baseline_ap = average_precision_score(y_test, baseline_probs)
+
+print(classification_report(y_test, baseline_preds, digits=3))
+print(f"Baseline Average Precision: {baseline_ap:.3f}")
+```
+
+# Define SMALLER parameter grid for speed
+# Can expand on this in the future*
+
+```{python}
+
+param_grid = {
+    'n_estimators': [100, 200],           
+    'max_depth': [4, 6],                  
+    'learning_rate': [0.05, 0.1],        
+    'subsample': [0.8, 0.9],             
+    'colsample_bytree': [0.8, 0.9],      
+}
+
+print(f"Parameter combinations: {2*2*2*2*2} = 32 total")
+```
+
+# Use RandomizedSearchCV for efficiency
+
+```{python}
+scorer = make_scorer(average_precision_score, needs_proba=True)
+random_search = RandomizedSearchCV(
+    estimator=XGBClassifier(
+        scale_pos_weight=scale_pos_weight,
+        enable_categorical=True,
+        random_state=13,
+        n_jobs=-1
+    ),
+    param_distributions=param_grid,
+    n_iter=15,  
+    scoring=scorer,
+    cv=3,
+    verbose=1,
+    random_state=13,
+    n_jobs=-1
+)
+
+
+start_time = time.time()
+random_search.fit(X_train, y_train)
+end_time = time.time()
+
+print(f"Best parameters: {random_search.best_params_}")
+print(f"Best CV score: {random_search.best_score_:.3f}")
+
+
+```
+
+# Get best model and evaluate *Takes Time!!!
+
+```{python}
+
+best_model = random_search.best_estimator_
+tuned_preds = best_model.predict(X_test)
+tuned_probs = best_model.predict_proba(X_test)[:, 1]
+tuned_ap = average_precision_score(y_test, tuned_probs)
+
+print("TUNED MODEL RESULTS:")
+print(classification_report(y_test, tuned_preds, digits=3))
+print(f"Tuned Average Precision: {tuned_ap:.3f}")
+
+print(f"\nIMPROVEMENT:")
+print(f"AP improvement: {tuned_ap - baseline_ap:.3f}")
+print(f"Relative improvement: {((tuned_ap - baseline_ap) / baseline_ap * 100):.1f}%")
+
+print("\nTOP FEATURE IMPORTANCES")
+feature_importance = best_model.feature_importances_
+importance_df = pd.DataFrame({
+    'feature': X.columns,
+    'importance': feature_importance
+}).sort_values('importance', ascending=False)
+
+print(importance_df.head(10))
+
+
+```
+
+# Break here
+
+
+# Implementing: SMOTE, Better Metrics, Feature Engineering, SHAP, Threshold Optimization
+
+```{python}
+
+FAST_MODE = True           
+SKIP_SHAP = True          
+SKIP_EXTRA_SAMPLING = True 
+USE_SAMPLE_DATA = True    
+SAMPLE_SIZE = 0.3        
+
+if FAST_MODE:
+    N_ESTIMATORS = 50     
+    MAX_DEPTH = 4         
+    LEARNING_RATE = 0.2   
+    SMOTE_NEIGHBORS = 3  
+else:
+    N_ESTIMATORS = 300
+    MAX_DEPTH = 6
+    LEARNING_RATE = 0.05
+    SMOTE_NEIGHBORS = 5
+
+
+from imblearn.over_sampling import SMOTE
+from sklearn.metrics import (
+    precision_recall_curve, average_precision_score, roc_auc_score, 
+    precision_score, recall_score, f1_score
+)
+from datetime import datetime
+import shap
+import warnings
+import gc
+warnings.filterwarnings('ignore')
+
+```
+
+
+
+```{python}
+df_improved = pd.read_csv(r"C:\Users\court\Downloads\Turn_in_Models\spotify_billboard_fuzzy95.csv")
+
+df_improved["song_flag"] = df_improved["combo"].notna().astype(int)
+
+```
+
+# ENHANCED FEATURE ENGINEERING
+```{python}
+
+
+def create_enhanced_features(df):
+    df_enhanced = df.copy()
+    
+    # Artist frequency features (already partially implemented)
+    artist_freq = df_enhanced.groupby('artist_name').size()
+    df_enhanced['artist_track_count'] = df_enhanced['artist_name'].map(artist_freq)
+    
+    # Artist success rate (hits/total tracks)
+    artist_success = df_enhanced.groupby('artist_name')['song_flag'].agg(['mean', 'count'])
+    df_enhanced['artist_hit_rate'] = df_enhanced['artist_name'].map(artist_success['mean'])
+    df_enhanced['artist_experience'] = df_enhanced['artist_name'].map(artist_success['count'])
+    
+    # Audio feature interactions
+    if 'energy' in df_enhanced.columns and 'valence' in df_enhanced.columns:
+        df_enhanced['energy_valence_interaction'] = df_enhanced['energy'] * df_enhanced['valence']
+    
+    if 'danceability' in df_enhanced.columns and 'tempo' in df_enhanced.columns:
+        df_enhanced['dance_tempo_ratio'] = df_enhanced['danceability'] / (df_enhanced['tempo'] / 100)
+    
+    # Audio feature combinations
+    audio_features = ['danceability', 'energy', 'valence', 'acousticness', 'instrumentalness', 'liveness', 'speechiness']
+    available_audio = [col for col in audio_features if col in df_enhanced.columns]
+    
+    if len(available_audio) >= 2:
+        df_enhanced['audio_diversity'] = df_enhanced[available_audio].std(axis=1)
+        df_enhanced['audio_intensity'] = df_enhanced[available_audio].mean(axis=1)
+    
+    return df_enhanced
+
+# Apply feature engineering
+df_enhanced = create_enhanced_features(df_improved)
+print(f"Enhanced dataset shape: {df_enhanced.shape}")
+
+# DATA SAMPLING FOR PERFORMANCE 
+if USE_SAMPLE_DATA and len(df_enhanced) > 5000:
+    print(f"SAMPLING DATA FOR PERFORMANCE")
+    original_size = len(df_enhanced)
+    
+    # Stratified sampling to maintain class balance
+    from sklearn.model_selection import train_test_split
+    df_enhanced, _ = train_test_split(
+        df_enhanced, 
+        test_size=1-SAMPLE_SIZE,
+        stratify=df_enhanced['song_flag'],
+        random_state=13
+    )
+    
+    print(f"Dataset size reduced: {original_size:,} → {len(df_enhanced):,} ({SAMPLE_SIZE:.0%})")
+    print(f"Memory saved: ~{(1-SAMPLE_SIZE)*100:.0f}%")
+
+columns_to_drop = ["combo", "min_rank", "artist", "song", "track_id", "track_name"]
+columns_to_drop = [col for col in columns_to_drop if col in df_enhanced.columns]
+df_enhanced = df_enhanced.drop(columns=columns_to_drop)
+
+print(f"Final dataset shape: {df_enhanced.shape}")
+if not USE_SAMPLE_DATA:
+    print(f"New features added: {set(df_enhanced.columns) - set(df_improved.columns)}")
+
+gc.collect()
+
+```
+
+# PREPARE DATA WITH ENHANCED FEATURES 
+```{python}
+
+X_enhanced = df_enhanced.drop(columns=["song_flag"])
+y_enhanced = df_enhanced["song_flag"]
+
+# Handle object columns - encode them as numeric for compatibility
+obj_cols = X_enhanced.select_dtypes(include="object").columns
+print(f"Object columns found: {obj_cols.tolist()}")
+
+# Label encode categorical features immediately to avoid dtype issues
+from sklearn.preprocessing import LabelEncoder
+label_encoders_initial = {}
+
+for col in obj_cols:
+    print(f"Encoding {col}...")
+    X_enhanced[col] = X_enhanced[col].fillna('Unknown').astype(str)
+
+    le = LabelEncoder()
+    X_enhanced[col] = le.fit_transform(X_enhanced[col])
+    label_encoders_initial[col] = le
+    
+
+X_train_enh, X_test_enh, y_train_enh, y_test_enh = train_test_split(
+    X_enhanced, y_enhanced, 
+    test_size=0.2, 
+    stratify=y_enhanced, 
+    random_state=13
+)
+
+print(f"Enhanced training set: {X_train_enh.shape}")
+print(f"Enhanced test set: {X_test_enh.shape}")
+print(f"Class distribution in training: {y_train_enh.value_counts(normalize=True)}")
+
+```
+
+# APPLY SMOTE FOR CLASS IMBALANCE
+
+```{python}
+missing_train = X_train_enh.isnull().sum()
+missing_test = X_test_enh.isnull().sum()
+
+from sklearn.impute import SimpleImputer
+
+X_train_numeric = X_train_enh.copy()
+X_test_numeric_prep = X_test_enh.copy()
+
+if X_train_numeric.isnull().any().any():
+    imputer = SimpleImputer(strategy='median')
+    X_train_numeric = pd.DataFrame(
+        imputer.fit_transform(X_train_numeric), 
+        columns=X_train_numeric.columns,
+        index=X_train_numeric.index
+    )
+    X_test_numeric_prep = pd.DataFrame(
+        imputer.transform(X_test_numeric_prep),
+        columns=X_test_numeric_prep.columns, 
+        index=X_test_numeric_prep.index
+    )
+
+print(f"Training data dtypes: {X_train_numeric.dtypes.unique()}")
+print(f"Test data dtypes: {X_test_numeric_prep.dtypes.unique()}")
+```
+
+# Class Imbalance
+```{python}
+class_counts = y_train_enh.value_counts()
+for class_label, count in class_counts.items():
+    percentage = (count / len(y_train_enh)) * 100
+    print(f"  Class {class_label}: {count:,} samples ({percentage:.1f}%)")
+
+minority_class_size = class_counts.min()
+majority_class_size = class_counts.max()
+imbalance_ratio = majority_class_size / minority_class_size
+
+print(f"Imbalance ratio: {imbalance_ratio:.1f}:1")
+print(f"Minority class size: {minority_class_size}")
+print(f"Dataset dimensions: {X_train_numeric.shape}")
+
+# Adaptive SMOTE parameters based on dataset characteristics
+if minority_class_size < 10:
+    print("Very few minority samples - using BorderlineSMOTE")
+    from imblearn.over_sampling import BorderlineSMOTE
+    smote = BorderlineSMOTE(random_state=13, k_neighbors=min(5, minority_class_size-1))
+elif minority_class_size < 50:
+    print("Using SMOTE with reduced k_neighbors")
+    smote = SMOTE(random_state=13, k_neighbors=min(3, minority_class_size-1))
+else:
+    print("Using standard SMOTE")
+    smote = SMOTE(random_state=13, k_neighbors=5)
+
+# Alternative: Try different sampling strategies
+
+# Strategy 1: Optimized SMOTE (for performance)
+try:
+    print("Trying optimized SMOTE...")
+    smote_balanced = SMOTE(random_state=13, k_neighbors=min(SMOTE_NEIGHBORS, minority_class_size-1), n_jobs=1)
+    X_train_smote_balanced, y_train_smote_balanced = smote_balanced.fit_resample(X_train_numeric, y_train_enh)
+    
+    print(f"Balanced SMOTE successful!")
+    print(f"  Original: {len(y_train_enh):,} samples")
+    print(f"  After SMOTE: {len(y_train_smote_balanced):,} samples")
+    print(f"  New distribution:")
+    for class_label, count in pd.Series(y_train_smote_balanced).value_counts().items():
+        percentage = (count / len(y_train_smote_balanced)) * 100
+        print(f"    Class {class_label}: {count:,} samples ({percentage:.1f}%)")
+    
+    # Use balanced version
+    X_train_smote = X_train_smote_balanced
+    y_train_smote = y_train_smote_balanced
+    smote_success = True
+    
+except Exception as e:
+    print(f"Balanced SMOTE failed: {str(e)}")
+    smote_success = False
+
+# Strategy 2: Custom ratio SMOTE (less aggressive)
+if not smote_success:
+    try:
+        print("Trying custom ratio SMOTE (0.3 ratio)...")
+        # Make minority class 30% instead of 50%
+        target_ratio = 0.3
+        majority_count = class_counts.max()
+        target_minority_count = int(majority_count * target_ratio / (1 - target_ratio))
+        
+        smote_custom = SMOTE(
+            sampling_strategy={1: target_minority_count}, 
+            random_state=13, 
+            k_neighbors=min(3, minority_class_size-1)
+        )
+        X_train_smote_custom, y_train_smote_custom = smote_custom.fit_resample(X_train_numeric, y_train_enh)
+        
+        print(f"Custom SMOTE successful!")
+        print(f"  Target minority samples: {target_minority_count:,}")
+        print(f"  New distribution:")
+        for class_label, count in pd.Series(y_train_smote_custom).value_counts().items():
+            percentage = (count / len(y_train_smote_custom)) * 100
+            print(f"    Class {class_label}: {count:,} samples ({percentage:.1f}%)")
+        
+        # Use custom version
+        X_train_smote = X_train_smote_custom
+        y_train_smote = y_train_smote_custom
+        smote_success = True
+        
+    except Exception as e:
+        print(f"Custom SMOTE failed: {str(e)}")
+        smote_success = False
+
+# Strategy 3: Fallback - use original data with class weights
+if not smote_success:
+    print("All SMOTE strategies failed - using original data with class weights")
+    print("This will rely on scale_pos_weight in XGBoost instead")
+    X_train_smote = X_train_numeric.copy()
+    y_train_smote = y_train_enh.copy()
+    
+    print(f"Using original training data:")
+    print(f"  Size: {len(y_train_smote):,} samples")
+    for class_label, count in y_train_smote.value_counts().items():
+        percentage = (count / len(y_train_smote)) * 100
+        print(f"  Class {class_label}: {count:,} samples ({percentage:.1f}%)")
+
+X_test_numeric = X_test_numeric_prep.copy()
+
+sampling_results = {}
+
+if not SKIP_EXTRA_SAMPLING:
+    print("\nTESTING ALTERNATIVE SAMPLING METHODS")
+    
+    # 1. Random Oversampling (fastest fallback)
+    try:
+        from imblearn.over_sampling import RandomOverSampler
+        print("Testing RandomOverSampler...")
+        ros = RandomOverSampler(random_state=13)
+        X_ros, y_ros = ros.fit_resample(X_train_numeric, y_train_enh)
+        sampling_results['RandomOver'] = (X_ros, y_ros)
+        print(f"RandomOverSampler successful: {len(X_ros):,} samples")
+    except Exception as e:
+        print(f"RandomOverSampler failed: {str(e)}")
+
+    if not FAST_MODE:
+        # 2. ADASYN (Adaptive Synthetic Sampling) 
+        try:
+            from imblearn.over_sampling import ADASYN
+            print("Testing ADASYN...")
+            adasyn = ADASYN(random_state=13, n_neighbors=min(SMOTE_NEIGHBORS, minority_class_size-1))
+            X_adasyn, y_adasyn = adasyn.fit_resample(X_train_numeric, y_train_enh)
+            sampling_results['ADASYN'] = (X_adasyn, y_adasyn)
+            print(f"ADASYN successful: {len(X_adasyn):,} samples")
+        except Exception as e:
+            print(f"ADASYN failed: {str(e)}")
+else:
+    print("\nSkipping alternative sampling methods for speed")
+
+# Choose the best available sampling method
+if smote_success:
+    print(f"\nUsing SMOTE result: {len(X_train_smote):,} samples")
+    final_method = "SMOTE"
+elif 'ADASYN' in sampling_results:
+    X_train_smote, y_train_smote = sampling_results['ADASYN']
+    print(f"\nUsing ADASYN result: {len(X_train_smote):,} samples")
+    final_method = "ADASYN"
+elif 'SMOTE+Tomek' in sampling_results:
+    X_train_smote, y_train_smote = sampling_results['SMOTE+Tomek']
+    print(f"\nUsing SMOTE+Tomek result: {len(X_train_smote):,} samples")
+    final_method = "SMOTE+Tomek"
+elif 'RandomOver' in sampling_results:
+    X_train_smote, y_train_smote = sampling_results['RandomOver']
+    print(f"\nUsing RandomOverSampler result: {len(X_train_smote):,} samples")
+    final_method = "RandomOverSampler"
+else:
+    print(f"\nAll sampling methods failed - using original data")
+    final_method = "Original (No Sampling)"
+
+# Convert to DataFrames and ensure proper formatting
+if isinstance(X_train_smote, np.ndarray):
+    X_train_smote = pd.DataFrame(X_train_smote, columns=X_train_numeric.columns)
+if isinstance(y_train_smote, np.ndarray):
+    y_train_smote = pd.Series(y_train_smote)
+
+X_test_numeric = pd.DataFrame(X_test_numeric, columns=X_test_numeric_prep.columns)
+
+# Ensure all columns are numeric (int/float) for XGBoost
+for col in X_train_smote.columns:
+    if X_train_smote[col].dtype == 'object':
+        X_train_smote[col] = pd.to_numeric(X_train_smote[col], errors='coerce').fillna(0)
+        
+for col in X_test_numeric.columns:
+    if X_test_numeric[col].dtype == 'object':
+        X_test_numeric[col] = pd.to_numeric(X_test_numeric[col], errors='coerce').fillna(0)
+
+print(f"\n FINAL SAMPLING SUMMARY:")
+print(f"  Method used: {final_method}")
+print(f"  Training samples: {len(X_train_smote):,}")
+print(f"  Final class distribution:")
+final_dist = pd.Series(y_train_smote).value_counts(normalize=True)
+for class_label, percentage in final_dist.items():
+    print(f"    Class {class_label}: {percentage:.1%}")
+
+# Store sampling method for later reference
+sampling_method_used = final_method
+
+# Final verification
+print(f"SMOTE training set shape: {X_train_smote.shape}")
+print(f"Test set shape: {X_test_numeric.shape}")
+print(f"Any NaN in SMOTE training: {X_train_smote.isnull().any().any()}")
+print(f"Any NaN in test: {X_test_numeric.isnull().any().any()}")
+print(f"Training dtypes: {X_train_smote.dtypes.unique()}")
+print(f"Test dtypes: {X_test_numeric.dtypes.unique()}")
+
+```
+
+# COMPREHENSIVE MODEL EVALUATION FUNCTION
+
+```{python}
+def comprehensive_evaluation(y_true, y_pred, y_proba, model_name="Model"):
+
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    roc_auc = roc_auc_score(y_true, y_proba)
+    avg_precision = average_precision_score(y_true, y_proba)
+    
+    print(f"\n=== {model_name.upper()} EVALUATION")
+    print(f"Precision: {precision:.3f}")
+    print(f"Recall: {recall:.3f}")
+    print(f"F1-Score: {f1:.3f}")
+    print(f"ROC-AUC: {roc_auc:.3f}")
+    print(f"Average Precision (AP): {avg_precision:.3f}")
+
+    print(f"\nDetailed Classification Report:")
+    print(classification_report(y_true, y_pred, digits=3))
+    
+    return {
+        'precision': precision,
+        'recall': recall, 
+        'f1': f1,
+        'roc_auc': roc_auc,
+        'avg_precision': avg_precision
+    }
+
+```
+
+# TRAIN BASELINE MODEL 
+```{python}
+scale_pos_weight = (len(y_train_enh) - y_train_enh.sum()) / y_train_enh.sum()
+
+baseline_model = XGBClassifier(
+    n_estimators=N_ESTIMATORS,      # Dynamic based on mode
+    learning_rate=LEARNING_RATE,    # Dynamic based on mode
+    max_depth=MAX_DEPTH,            # Dynamic based on mode
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=scale_pos_weight,
+    enable_categorical=False,       # Using numeric data only
+    random_state=13,
+    n_jobs=2 if FAST_MODE else -1,  # Limit CPU usage in fast mode
+    tree_method='hist' if FAST_MODE else 'auto'  # Faster tree construction
+)
+
+baseline_model.fit(X_train_numeric, y_train_enh)
+
+baseline_preds = baseline_model.predict(X_test_numeric)
+baseline_probs = baseline_model.predict_proba(X_test_numeric)[:, 1]
+
+baseline_metrics = comprehensive_evaluation(y_test_enh, baseline_preds, baseline_probs, "Baseline (Scale Pos Weight)")
+
+gc.collect()
+
+```
+
+# TRAIN ENHANCED SAMPLING MODEL
+```{python}
+
+enhanced_model = XGBClassifier(
+    n_estimators=N_ESTIMATORS,      # Dynamic based on mode
+    learning_rate=LEARNING_RATE,    # Dynamic based on mode 
+    max_depth=MAX_DEPTH,            # Dynamic based on mode
+    subsample=0.8,
+    colsample_bytree=0.8,
+    enable_categorical=False,       # Using numeric data only
+    random_state=13,
+    n_jobs=2 if FAST_MODE else -1,  # Limit CPU usage in fast mode
+    tree_method='hist' if FAST_MODE else 'auto'  # Faster tree construction
+)
+
+enhanced_model.fit(X_train_smote, y_train_smote)
+
+enhanced_preds = enhanced_model.predict(X_test_numeric)
+enhanced_probs = enhanced_model.predict_proba(X_test_numeric)[:, 1]
+
+enhanced_metrics = comprehensive_evaluation(y_test_enh, enhanced_preds, enhanced_probs, f"{final_method} Enhanced")
+
+gc.collect()
+
+```
+
+# COMPREHENSIVE CUTOFF ANALYSIS
+
+```{python}
+
+def analyze_probability_distribution(y_true, y_proba, model_name):
+    hit_probs = y_proba[y_true == 1]
+    non_hit_probs = y_proba[y_true == 0]
+    
+    print(f"Hit songs (Class 1) - {len(hit_probs)} samples:")
+    print(f"  Mean probability: {hit_probs.mean():.3f}")
+    print(f"  Median probability: {np.median(hit_probs):.3f}")
+    print(f"  Min probability: {hit_probs.min():.3f}")
+    print(f"  Max probability: {hit_probs.max():.3f}")
+    print(f"  25th percentile: {np.percentile(hit_probs, 25):.3f}")
+    print(f"  75th percentile: {np.percentile(hit_probs, 75):.3f}")
+    
+    print(f"\nNon-hit songs (Class 0) - {len(non_hit_probs)} samples:")
+    print(f"  Mean probability: {non_hit_probs.mean():.3f}")
+    print(f"  Median probability: {np.median(non_hit_probs):.3f}")
+    print(f"  Min probability: {non_hit_probs.min():.3f}")
+    print(f"  Max probability: {non_hit_probs.max():.3f}")
+    print(f"  25th percentile: {np.percentile(non_hit_probs, 25):.3f}")
+    print(f"  75th percentile: {np.percentile(non_hit_probs, 75):.3f}")
+
+    print(f"\n DATA-DRIVEN THRESHOLD SUGGESTIONS:")
+    print(f"  Conservative (High Precision): {np.percentile(hit_probs, 25):.3f}")
+    print(f"  Balanced (Median of Hits): {np.median(hit_probs):.3f}")
+    print(f"  Aggressive (75th %ile Non-hits): {np.percentile(non_hit_probs, 75):.3f}")
+    print(f"  Very Aggressive (Mean Non-hits): {non_hit_probs.mean():.3f}")
+    
+    return hit_probs, non_hit_probs
+
+baseline_hit_probs, baseline_non_hit_probs = analyze_probability_distribution(y_test_enh, baseline_probs, "Baseline")
+enhanced_hit_probs, enhanced_non_hit_probs = analyze_probability_distribution(y_test_enh, enhanced_probs, final_method)
+
+```
+
+# COMPREHENSIVE THRESHOLD TESTING
+```{python}
+def comprehensive_threshold_analysis(y_true, y_proba, model_name):
+
+    thresholds = np.concatenate([
+        np.arange(0.00005, 0.1, 0.00005),   # Very low thresholds: 0.01 to 0.09
+        np.arange(0.1, 0.5, 0.02),    # Low to medium: 0.1 to 0.48
+        np.arange(0.5, 1.0, 0.05)     # Medium to high: 0.5 to 0.95
+    ])
+    
+    results = []
+    
+    for threshold in thresholds:
+        y_pred = (y_proba >= threshold).astype(int)
+        try:
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+            
+            # Business metrics
+            total_predictions = len(y_pred)
+            predicted_hits = sum(y_pred)
+            actual_hits = sum(y_true)
+            
+            # Hit capture rate
+            hit_capture_rate = recall
+            # Precision (how many predicted hits are actual hits)
+            hit_precision = precision
+            # False positive rate
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+            
+            results.append({
+                'threshold': threshold,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'true_pos': tp,
+                'false_pos': fp,
+                'true_neg': tn,
+                'false_neg': fn,
+                'predicted_hits': predicted_hits,
+                'hit_capture_rate': hit_capture_rate,
+                'false_positive_rate': fpr,
+                'total_predictions': total_predictions
+            })
+        except:
+            continue
+    
+    results_df = pd.DataFrame(results)
+
+    optimal_thresholds = {}
+    
+    if len(results_df) > 0:
+        best_f1_idx = results_df['f1'].idxmax()
+        optimal_thresholds['f1'] = results_df.loc[best_f1_idx]
+
+        best_recall_idx = results_df['recall'].idxmax()
+        optimal_thresholds['recall'] = results_df.loc[best_recall_idx]
+
+        best_precision_idx = results_df['precision'].idxmax()
+        optimal_thresholds['precision'] = results_df.loc[best_precision_idx]
+
+        balanced_candidates = results_df[results_df['recall'] >= 0.7]
+        if len(balanced_candidates) > 0:
+            best_balanced_idx = balanced_candidates['precision'].idxmax()
+            optimal_thresholds['balanced'] = balanced_candidates.loc[best_balanced_idx]
+        else:
+            optimal_thresholds['balanced'] = optimal_thresholds['f1']
+
+        business_candidates = results_df[results_df['recall'] >= 0.8]
+        if len(business_candidates) > 0:
+            best_business_idx = business_candidates['precision'].idxmax()
+            optimal_thresholds['business'] = business_candidates.loc[best_business_idx]
+        else:
+            optimal_thresholds['business'] = optimal_thresholds['recall']
+    
+    return results_df, optimal_thresholds
+
+baseline_results, baseline_optimal = comprehensive_threshold_analysis(y_test_enh, baseline_probs, "Baseline")
+enhanced_results, enhanced_optimal = comprehensive_threshold_analysis(y_test_enh, enhanced_probs, final_method)
+
+```
+
+# THRESHOLD RECOMMENDATIONS
+```{python}
+
+def print_threshold_recommendations(optimal_thresholds, model_name):
+    print(f"\n{model_name.upper()} MODEL - OPTIMAL THRESHOLDS:")
+    
+    strategies = {
+        'f1': 'Best Overall Balance (F1-Score)',
+        'precision': 'Minimize False Alarms (High Precision)', 
+        'recall': 'Catch Most Hits (High Recall)',
+        'balanced': 'Business Balanced (70%+ Recall)',
+        'business': 'Conservative Business (80%+ Recall)'
+    }
+    
+    for strategy, description in strategies.items():
+        if strategy in optimal_thresholds:
+            opt = optimal_thresholds[strategy]
+            print(f"\n  {description}:")
+            print(f"    Threshold: {opt['threshold']:.3f}")
+            print(f"    Precision: {opt['precision']:.3f}")
+            print(f"    Recall: {opt['recall']:.3f}")
+            print(f"    F1-Score: {opt['f1']:.3f}")
+            print(f"    Predicted Hits: {opt['predicted_hits']:,} / {opt['total_predictions']:,} ({opt['predicted_hits']/opt['total_predictions']:.1%})")
+            print(f"    True Hits Caught: {opt['true_pos']:,} / {opt['true_pos'] + opt['false_neg']:,}")
+            print(f"    False Alarms: {opt['false_pos']:,}")
+
+print_threshold_recommendations(baseline_optimal, "Baseline")
+print_threshold_recommendations(enhanced_optimal, final_method)
+
+```
+
+# VISUAL THRESHOLD ANALYSIS
+```{python}
+fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+fig.suptitle('Threshold Analysis - Model Performance vs Cutoff Values', fontsize=16, fontweight='bold')
+
+models_data = [
+    (baseline_results, "Baseline", 'blue'),
+    (enhanced_results, final_method, 'red')
+]
+
+# Plot 1: Precision vs Threshold
+ax = axes[0, 0]
+for results_df, name, color in models_data:
+    if len(results_df) > 0:
+        ax.plot(results_df['threshold'], results_df['precision'], label=name, color=color, linewidth=2)
+ax.set_xlabel('Threshold')
+ax.set_ylabel('Precision')
+ax.set_title('Precision vs Threshold')
+ax.legend()
+ax.grid(True, alpha=0.3)
+ax.set_xlim(0, 1)
+
+# Plot 2: Recall vs Threshold  
+ax = axes[0, 1]
+for results_df, name, color in models_data:
+    if len(results_df) > 0:
+        ax.plot(results_df['threshold'], results_df['recall'], label=name, color=color, linewidth=2)
+ax.set_xlabel('Threshold')
+ax.set_ylabel('Recall')
+ax.set_title('Recall vs Threshold')
+ax.legend()
+ax.grid(True, alpha=0.3)
+ax.set_xlim(0, 1)
+
+# Plot 3: F1-Score vs Threshold
+ax = axes[0, 2]
+for results_df, name, color in models_data:
+    if len(results_df) > 0:
+        ax.plot(results_df['threshold'], results_df['f1'], label=name, color=color, linewidth=2)
+ax.set_xlabel('Threshold')
+ax.set_ylabel('F1-Score')
+ax.set_title('F1-Score vs Threshold')
+ax.legend()
+ax.grid(True, alpha=0.3)
+ax.set_xlim(0, 1)
+
+# Plot 4: Number of Predicted Hits vs Threshold
+ax = axes[1, 0]
+for results_df, name, color in models_data:
+    if len(results_df) > 0:
+        ax.plot(results_df['threshold'], results_df['predicted_hits'], label=name, color=color, linewidth=2)
+ax.set_xlabel('Threshold')
+ax.set_ylabel('Number of Predicted Hits')
+ax.set_title('Predicted Hits vs Threshold')
+ax.legend()
+ax.grid(True, alpha=0.3)
+ax.set_xlim(0, 1)
+
+# Plot 5: Precision-Recall Trade-off
+ax = axes[1, 1]
+for results_df, name, color in models_data:
+    if len(results_df) > 0:
+        ax.plot(results_df['recall'], results_df['precision'], label=name, color=color, linewidth=2)
+ax.set_xlabel('Recall')
+ax.set_ylabel('Precision')
+ax.set_title('Precision-Recall Trade-off')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+# Plot 6: Probability Distribution
+ax = axes[1, 2]
+# Plot histograms of probabilities for hits vs non-hits
+ax.hist(baseline_non_hit_probs, bins=30, alpha=0.5, color='red', label='Non-Hits', density=True)
+ax.hist(baseline_hit_probs, bins=30, alpha=0.5, color='green', label='Hits', density=True)
+ax.set_xlabel('Predicted Probability')
+ax.set_ylabel('Density')
+ax.set_title('Probability Distribution by Class\n(Baseline Model)')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+```
+
+## IMPORTANT 
+
+# CHANGE CUTOFF MANUALLY!!!
+
+```{python}
+
+USE_MANUAL_CUTOFFS = True       # ← CHANGE TO True TO USE MANUAL THRESHOLDS
+MANUAL_BASELINE_CUTOFF = 0.09     # ← SET YOUR BASELINE MODEL THRESHOLD HERE
+MANUAL_ENHANCED_CUTOFF = 0.09     # ← SET YOUR ENHANCED MODEL THRESHOLD HERE
+MANUAL_SHAP_CUTOFF = 0.09         # ← SET YOUR SHAP MODEL THRESHOLD HERE
+
+# ========================================================================
+
+RECOMMENDED_STRATEGY = 'balanced'  
+
+if USE_MANUAL_CUTOFFS:
+    baseline_final_threshold = MANUAL_BASELINE_CUTOFF
+    enhanced_final_threshold = MANUAL_ENHANCED_CUTOFF
+    baseline_preds_opt = (baseline_probs >= baseline_final_threshold).astype(int)
+    enhanced_preds_opt = (enhanced_probs >= enhanced_final_threshold).astype(int)
+    print(f" Applied manual thresholds: Baseline={baseline_final_threshold}, Enhanced={enhanced_final_threshold}")
+else:
+    if RECOMMENDED_STRATEGY in baseline_optimal:
+        baseline_final_threshold = baseline_optimal[RECOMMENDED_STRATEGY]['threshold']
+        baseline_preds_opt = (baseline_probs >= baseline_final_threshold).astype(int)
+    else:
+        baseline_final_threshold = 0.5
+        baseline_preds_opt = (baseline_probs >= baseline_final_threshold).astype(int)
+
+    if RECOMMENDED_STRATEGY in enhanced_optimal:
+        enhanced_final_threshold = enhanced_optimal[RECOMMENDED_STRATEGY]['threshold'] 
+        enhanced_preds_opt = (enhanced_probs >= enhanced_final_threshold).astype(int)
+    else:
+        enhanced_final_threshold = 0.5
+        enhanced_preds_opt = (enhanced_probs >= enhanced_final_threshold).astype(int)
+    print(f" Applied automatic thresholds: Baseline={baseline_final_threshold:.3f}, Enhanced={enhanced_final_threshold:.3f}")
+
+print(f"\n SELECTED THRESHOLDS:")
+print(f"  Baseline Model: {baseline_final_threshold:.3f}")
+print(f"  {final_method} Model: {enhanced_final_threshold:.3f}")
+
+# Store for backward compatibility
+baseline_optimal_thresh = baseline_final_threshold
+enhanced_optimal_thresh = enhanced_final_threshold
+
+
+
+# Evaluate with optimal thresholds
+print("\nTHRESHOLD-OPTIMIZED RESULTS")
+baseline_opt_metrics = comprehensive_evaluation(y_test_enh, baseline_preds_opt, baseline_probs, "Baseline (Optimal Threshold)")
+enhanced_opt_metrics = comprehensive_evaluation(y_test_enh, enhanced_preds_opt, enhanced_probs, f"{final_method} (Optimal Threshold)")
+
+```
+
+#  CONFUSION MATRICES FOR ALL MODEL ITERATIONS
+```{python}
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+models_data = {
+    'Baseline (Default)': baseline_preds,
+    'Baseline (Optimized)': baseline_preds_opt, 
+    f'{final_method} (Default)': enhanced_preds,
+    f'{final_method} (Optimized)': enhanced_preds_opt
+}
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+fig.suptitle('Confusion Matrices - All Model Iterations', fontsize=16, fontweight='bold')
+
+axes = axes.flatten()
+
+for idx, (model_name, predictions) in enumerate(models_data.items()):
+    cm = confusion_matrix(y_test_enh, predictions)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[idx],
+                xticklabels=['Non-Hit', 'Hit'], yticklabels=['Non-Hit', 'Hit'])
+    
+    axes[idx].set_title(f'{model_name}\n', fontweight='bold')
+    axes[idx].set_xlabel('Predicted')
+    axes[idx].set_ylabel('Actual')
+
+    tn, fp, fn, tp = cm.ravel()
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+    textstr = f'Precision: {precision:.3f}\nRecall: {recall:.3f}\nF1: {f1:.3f}'
+    props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    axes[idx].text(0.02, 0.98, textstr, transform=axes[idx].transAxes, fontsize=9,
+                   verticalalignment='top', bbox=props)
+
+plt.tight_layout()
+plt.show()
+
+print("\n=== DETAILED CONFUSION MATRIX ANALYSIS ===")
+for model_name, predictions in models_data.items():
+    cm = confusion_matrix(y_test_enh, predictions)
+    tn, fp, fn, tp = cm.ravel()
+    
+    print(f"\n{model_name.upper()}:")
+    print(f"  True Negatives (Correct Non-Hits):  {tn:4d}")
+    print(f"  False Positives (Missed Non-Hits):  {fp:4d}")
+    print(f"  False Negatives (Missed Hits):      {fn:4d}")
+    print(f"  True Positives (Correct Hits):      {tp:4d}")
+    print(f"  Total Predictions:                  {tn+fp+fn+tp:4d}")
+
+    hit_recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    non_hit_recall = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    print(f"  Hit Detection Rate (Recall):        {hit_recall:.3f}")
+    print(f"  Non-Hit Detection Rate (Specificity): {non_hit_recall:.3f}")
+
+```
+
+# 8.6. ROC CURVES (ALWAYS ENABLED)
+```{python}
+from sklearn.metrics import roc_curve, auc
+
+models_proba_data = {
+    'Baseline': baseline_probs,
+    f'{final_method}': enhanced_probs
+}
+
+plt.figure(figsize=(10, 8))
+
+colors = ['blue', 'red', 'green', 'orange']
+for idx, (model_name, probabilities) in enumerate(models_proba_data.items()):
+    fpr, tpr, _ = roc_curve(y_test_enh, probabilities)
+    roc_auc = auc(fpr, tpr)
+    
+    plt.plot(fpr, tpr, color=colors[idx], lw=2, 
+             label=f'{model_name} (AUC = {roc_auc:.3f})')
+
+plt.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--', alpha=0.8)
+
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate (1 - Specificity)')
+plt.ylabel('True Positive Rate (Sensitivity)')
+plt.title('ROC Curves - Model Comparison')
+plt.legend(loc="lower right")
+plt.grid(True, alpha=0.3)
+plt.show()
+
+if not FAST_MODE:
+    print("PRECISION-RECALL CURVES")    
+    from sklearn.metrics import precision_recall_curve
+    plt.figure(figsize=(10, 8))
+    
+    for idx, (model_name, probabilities) in enumerate(models_proba_data.items()):
+        precision, recall, _ = precision_recall_curve(y_test_enh, probabilities)
+        avg_precision = average_precision_score(y_test_enh, probabilities)
+
+        plt.plot(recall, precision, color=colors[idx], lw=2,
+                 label=f'{model_name} (AP = {avg_precision:.3f})')
+    
+    plt.xlabel('Recall (Sensitivity)')
+    plt.ylabel('Precision')
+    plt.title('Precision-Recall Curves - Model Comparison')
+    plt.legend(loc="lower left")
+    plt.grid(True, alpha=0.3)
+    
+    # Add baseline (random classifier)
+    baseline_ap = y_test_enh.mean()  # Proportion of positive class
+    plt.axhline(y=baseline_ap, color='gray', linestyle='--', alpha=0.8, 
+               label=f'Random Baseline (AP = {baseline_ap:.3f})')
+    plt.legend(loc="lower left")
+    plt.show()
+else:
+    print("Precision-Recall curves skipped in fast mode")
+    print("To enable PR curves: Set FAST_MODE = False")
+
+```
+
+# SHAP INTERPRETABILITY ANALYSIS
+```{python}
+
+if not SKIP_SHAP:
+    sample_size = min(200 if FAST_MODE else 1000, len(X_train_smote))
+    X_sample_for_shap = X_train_smote.sample(n=sample_size, random_state=13)
+
+    better_model = enhanced_model if enhanced_opt_metrics['f1'] > baseline_opt_metrics['f1'] else baseline_model
+    model_name = final_method if enhanced_opt_metrics['f1'] > baseline_opt_metrics['f1'] else "Baseline"
+    
+    explainer = shap.TreeExplainer(better_model)
+    shap_values = explainer.shap_values(X_sample_for_shap)
+    
+
+    feature_importance_shap = np.abs(shap_values).mean(0)
+    feature_names = X_sample_for_shap.columns
+
+    shap_importance_df = pd.DataFrame({
+        'feature': feature_names,
+        'shap_importance': feature_importance_shap
+    }).sort_values('shap_importance', ascending=False)
+
+    print("\nTOP 10 FEATURES BY SHAP IMPORTANCE")
+    print(shap_importance_df.head(10))
+
+    genre_features = [col for col in feature_names if 'genre' in col.lower()]
+    if genre_features:
+        print(f"\nGENRE FEATURES ANALYSIS (Potential Data Leakage Check)")
+        for genre_feat in genre_features:
+            importance = shap_importance_df[shap_importance_df['feature'] == genre_feat]['shap_importance'].iloc[0]
+            print(f"{genre_feat}: SHAP importance = {importance:.4f}")
+else:
+    print("SHAP ANALYSIS SKIPPED FOR PERFORMANCE")
+    print("To enable: Set SKIP_SHAP = False")
+    # Create dummy values for later code compatibility
+    X_sample_for_shap = X_train_smote.sample(n=10, random_state=13)
+    shap_values = None
+    better_model = enhanced_model
+    
+    # Use XGBoost feature importance as fallback when SHAP is skipped
+    feature_names = X_sample_for_shap.columns
+    feature_importance_fallback = better_model.feature_importances_
+    
+    shap_importance_df = pd.DataFrame({
+        'feature': feature_names,
+        'shap_importance': feature_importance_fallback  # Using XGBoost importance as fallback
+    }).sort_values('shap_importance', ascending=False)
+    
+    print("\nTOP 10 FEATURES BY XGBOOST IMPORTANCE (SHAP FALLBACK)")
+    print(shap_importance_df.head(10))
+
+```
+
+# MODEL COMPARISON AND RECOMMENDATIONS
+```{python}
+
+
+comparison_df = pd.DataFrame({
+    'Model': ['Baseline', 'Baseline (Opt Thresh)', final_method, f'{final_method} (Opt Thresh)'],
+    'Precision': [baseline_metrics['precision'], baseline_opt_metrics['precision'], 
+                  enhanced_metrics['precision'], enhanced_opt_metrics['precision']],
+    'Recall': [baseline_metrics['recall'], baseline_opt_metrics['recall'],
+               enhanced_metrics['recall'], enhanced_opt_metrics['recall']],
+    'F1-Score': [baseline_metrics['f1'], baseline_opt_metrics['f1'],
+                 enhanced_metrics['f1'], enhanced_opt_metrics['f1']],
+    'ROC-AUC': [baseline_metrics['roc_auc'], baseline_opt_metrics['roc_auc'],
+                enhanced_metrics['roc_auc'], enhanced_opt_metrics['roc_auc']],
+    'Avg Precision': [baseline_metrics['avg_precision'], baseline_opt_metrics['avg_precision'],
+                      enhanced_metrics['avg_precision'], enhanced_opt_metrics['avg_precision']]
+})
+
+print(comparison_df.round(3))
+
+best_model_idx = comparison_df['F1-Score'].idxmax()
+best_model_name = comparison_df.loc[best_model_idx, 'Model']
+print(f"\nBest performing model: {best_model_name}")
+
+```
+
+# FEATURE IMPORTANCE VISUALIZATION
+
+```{python}
+import matplotlib.pyplot as plt
+
+# Compare XGBoost native importance vs SHAP importance
+xgb_importance = better_model.feature_importances_
+xgb_importance_df = pd.DataFrame({
+    'feature': feature_names,
+    'xgb_importance': xgb_importance
+}).sort_values('xgb_importance', ascending=False)
+
+print("Top 10 features by XGBoost native importance:")
+print(xgb_importance_df.head(10))
+
+# Create comparison plot
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 8))
+
+# XGBoost importance
+top_xgb = xgb_importance_df.head(10)
+ax1.barh(range(len(top_xgb)), top_xgb['xgb_importance'])
+ax1.set_yticks(range(len(top_xgb)))
+ax1.set_yticklabels(top_xgb['feature'])
+ax1.set_xlabel('XGBoost Feature Importance')
+ax1.set_title('Top 10 Features - XGBoost Native Importance')
+ax1.invert_yaxis()
+
+# SHAP importance
+top_shap = shap_importance_df.head(10)
+ax2.barh(range(len(top_shap)), top_shap['shap_importance'])
+ax2.set_yticks(range(len(top_shap)))
+ax2.set_yticklabels(top_shap['feature'])
+ax2.set_xlabel('SHAP Importance (Mean |SHAP value|)')
+ax2.set_title('Top 10 Features - SHAP Importance')
+ax2.invert_yaxis()
+
+plt.tight_layout()
+plt.show()
+
+```
+
+# CONFUSION MATRIX FOR SHAP-ANALYZED MODEL
+```{python}
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report
+
+shap_model_probabilities = better_model.predict_proba(X_test_numeric)[:, 1]
+
+# Apply manual SHAP cutoff if manual cutoffs are enabled
+if USE_MANUAL_CUTOFFS:
+    shap_model_predictions = (shap_model_probabilities >= MANUAL_SHAP_CUTOFF).astype(int)
+    print(f" Using MANUAL SHAP cutoff: {MANUAL_SHAP_CUTOFF}")
+else:
+    shap_model_predictions = better_model.predict(X_test_numeric)
+    print(f"Using model's default cutoff (0.5)")
+
+# Determine which model SHAP is analyzing
+model_type = "Enhanced" if enhanced_opt_metrics['f1'] > baseline_opt_metrics['f1'] else "Baseline"
+print(f"SHAP is analyzing the: {model_type} Model ({final_method if model_type == 'Enhanced' else 'Scale Pos Weight'})")
+
+# Create confusion matrix
+cm = confusion_matrix(y_test_enh, shap_model_predictions)
+
+# Create visualization
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Confusion Matrix Heatmap
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax1,
+            xticklabels=['Non-Hit', 'Hit'], yticklabels=['Non-Hit', 'Hit'])
+ax1.set_title(f'Confusion Matrix - SHAP Model\n({model_type} XGBoost)', fontweight='bold', fontsize=14)
+ax1.set_xlabel('Predicted', fontsize=12)
+ax1.set_ylabel('Actual', fontsize=12)
+
+# Calculate detailed metrics
+tn, fp, fn, tp = cm.ravel()
+precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+accuracy = (tp + tn) / (tp + tn + fp + fn)
+
+# Add metrics text box
+textstr = f'Accuracy: {accuracy:.3f}\nPrecision: {precision:.3f}\nRecall: {recall:.3f}\nF1-Score: {f1:.3f}'
+props = dict(boxstyle='round', facecolor='lightgreen', alpha=0.8)
+ax1.text(0.02, 0.98, textstr, transform=ax1.transAxes, fontsize=11,
+         verticalalignment='top', bbox=props)
+
+# Normalized Confusion Matrix (Percentages)
+cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+sns.heatmap(cm_normalized, annot=True, fmt='.2%', cmap='Oranges', ax=ax2,
+            xticklabels=['Non-Hit', 'Hit'], yticklabels=['Non-Hit', 'Hit'])
+ax2.set_title(f'Normalized Confusion Matrix\n(Row Percentages)', fontweight='bold', fontsize=14)
+ax2.set_xlabel('Predicted', fontsize=12)
+ax2.set_ylabel('Actual', fontsize=12)
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nDETAILED CONFUSION MATRIX BREAKDOWN")
+print(f"Model analyzed by SHAP: {model_type} XGBoost Model")
+print(f"Total test samples: {len(y_test_enh):,}")
+print(f"\nConfusion Matrix Values:")
+print(f"  True Negatives (Correctly predicted Non-Hits):  {tn:4,}")
+print(f"  False Positives (Wrongly predicted as Hits):    {fp:4,}")
+print(f"  False Negatives (Wrongly predicted as Non-Hits): {fn:4,}")
+print(f"  True Positives (Correctly predicted Hits):      {tp:4,}")
+
+print(f"\nPERFORMANCE METRICS")
+print(f"Accuracy:  {accuracy:.3f} ({accuracy*100:.1f}%)")
+print(f"Precision: {precision:.3f} ({precision*100:.1f}% of predicted hits are actual hits)")
+print(f"Recall:    {recall:.3f} ({recall*100:.1f}% of actual hits were caught)")
+print(f"F1-Score:  {f1:.3f}")
+
+print(f"\nBUSINESS INTERPRETATION")
+print(f"• Out of {tp + fn:,} actual hit songs, the model correctly identified {tp:,} ({recall*100:.1f}%)")
+print(f"• Out of {tp + fp:,} songs predicted as hits, {tp:,} were actually hits ({precision*100:.1f}%)")
+print(f"• The model would have {fp:,} false alarms (songs wrongly predicted as hits)")
+print(f"• The model would miss {fn:,} actual hits")
+
+print(f"\nDETAILED CLASSIFICATION REPORT")
+print(classification_report(y_test_enh, shap_model_predictions, 
+                          target_names=['Non-Hit', 'Hit'], digits=3))
+```
+
+# TOP 15 FEATURES VISUALIZATION
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+
+feature_importance = better_model.feature_importances_
+feature_names = X_test_numeric.columns
+
+importance_df = pd.DataFrame({
+    'feature': feature_names,
+    'importance': feature_importance
+}).sort_values('importance', ascending=False)
+
+top_15 = importance_df.head(15).copy()
+
+def categorize_features(feature_name):
+    # Engineered/Synthetic features (blue)
+    engineered_keywords = [
+        'artist_hit_rate', 'artist_track_count', 'artist_experience',
+        'energy_valence_interaction', 'dance_tempo_ratio', 
+        'audio_diversity', 'audio_intensity', 'artist_name_freq'
+    ]
+
+    for keyword in engineered_keywords:
+        if keyword in feature_name.lower():
+            return 'Engineered/Synthetic Features'
+    
+    # Everything else is original (orange)
+    return 'Original Dataset Features'
+
+top_15['category'] = top_15['feature'].apply(categorize_features)
+
+plt.figure(figsize=(12, 10))
+
+colors = {
+    'Original Dataset Features': '#FFA500',  # Orange
+    'Engineered/Synthetic Features': '#4A90E2'  # Blue
+}
+
+
+bars = []
+bar_colors = []
+for idx, row in top_15.iterrows():
+    color = colors[row['category']]
+    bar_colors.append(color)
+
+y_pos = np.arange(len(top_15))
+bars = plt.barh(y_pos, top_15['importance'], color=bar_colors)
+
+plt.xlabel('Feature Importance', fontsize=12, fontweight='bold')
+plt.title('Top 15 Features - SMOTE Optimized XGBoost Model\nBillboard Hit Prediction', 
+          fontsize=14, fontweight='bold', pad=20)
+
+plt.yticks(y_pos, top_15['feature'])
+plt.gca().invert_yaxis()  
+
+plt.grid(axis='x', alpha=0.3, linestyle='--')
+
+from matplotlib.patches import Patch
+legend_elements = [
+    Patch(facecolor=colors['Original Dataset Features'], label='Original Dataset Features'),
+    Patch(facecolor=colors['Engineered/Synthetic Features'], label='Engineered/Synthetic Features')
+]
+plt.legend(handles=legend_elements, loc='lower right', fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
+print("\nTOP 15 FEATURE IMPORTANCE VALUES")
+for idx, row in top_15.iterrows():
+    print(f"{row['feature']:25} {row['importance']:.4f} ({row['category']})")
+
+print(f"\nFEATURE CATEGORY BREAKDOWN")
+category_counts = top_15['category'].value_counts()
+for category, count in category_counts.items():
+    percentage = (count / len(top_15)) * 100
+    print(f"{category}: {count} features ({percentage:.1f}%)")
+    
+# Highlight if any engineered features are in top 5
+top_5_engineered = top_15.head(5)['category'].value_counts().get('Engineered/Synthetic Features', 0)
+if top_5_engineered > 0:
+    print(f"\nSUCCESS: {top_5_engineered} engineered feature(s) in top 5!")
+    print("This suggests that feature engineering improved model performance.")
+else:
+    print(f"\n All top 5 features are from original dataset.")
+    print("Consider creating more sophisticated engineered features.")
+```
