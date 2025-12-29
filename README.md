@@ -67,32 +67,42 @@ Modeling: C. Carlson
 
 ## Appendix images: 
 
+# Figure 1 - Predicted features with the most importance
 ![Figure 1 - Predicted features with the most importance](Fig1.png)
-Figure 1 - Predicted features with the most importance
+
+# Figure 2 - ROC curve
 ![Figure 2 - ROC curve](Fig2.png)
-Figure 2 - ROC curve
+
+# Figure 3 - Model Confusion Matrix
 ![Figure 3 - Model Confusion Matrix](Fig3.png)
-Figure 3 - Model Confusion Matrix
+
+# Figure 4  - SHAP matrix
 ![Figure 4  - SHAP matrix](Fig4.png)
-Figure 4  - SHAP matrix
+
+# Figure 5 - Threshold Analysis
 ![Figure 5 - Threshold Analysis](Fig5.png)
-Figure 5 - Threshold Analysis
+
+# Figure 6 - SHAP feature results
 ![Figure 6 - SHAP feature results](Fig6.png)
-Figure 6 - SHAP feature results
+
+# Figure 7 - SHAP feature results (Con.)
 ![Figure 7 - SHAP feature results (Con.)](Fig7.png)
-Figure 7 - SHAP feature results (Con.)
+
+# Figure 8 - Model without engineered artist fields
 ![Figure 8 - Model without engineered artist fields](Fig8.png)
-Figure 8 - Model without engineered artist fields
+
+# Figure 9 - ROC curve of the Model without engineered fields
 ![Figure 9 - ROC curve of the Model without engineered fields](Fig9.png)
-Figure 9 - ROC curve of the Model without engineered fields
+
 
 ## Appendix Tables:
 
+# Table 1 - Spotify Features from original dataset
 ![Table 1](Table1.png)
-Table 1 - Spotify Features from original dataset
 
+# Table 2 - Billboard features from web scraping
 ![Table 2](Table2.png)
-Table 2 - Billboard features from web scraping
+
 
 Code 
 Provided separately, includes all models and allows the attached graphs/tables to be recreated
